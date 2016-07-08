@@ -23,7 +23,6 @@ func main() {
 
 			if measurementEnded, ok := measurement.(*MeasurementEnded); ok {
 				id, err := store.Add(measurementEnded)
-				fmt.Println("lkjfdsaljsdlkjf")
 
 				if err != nil {
 					log.Printf("Could not save measurementEnded: %s", err.Error())

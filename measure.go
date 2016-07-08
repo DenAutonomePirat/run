@@ -8,8 +8,8 @@ import (
 )
 
 const (
-	PREPOSTDISTANCEM    = 5.0
-	POSTFINISHDISTANCEM = 5.0
+	PREPOSTDISTANCEM    = 1.0
+	POSTFINISHDISTANCEM = 20.0
 	MAXSPEED            = 10.0
 	MINSPEED            = 0.1
 )
@@ -23,12 +23,16 @@ type Measure struct {
 	runners    []Runner
 }
 type Runner struct {
-	PreTime             time.Time
-	PostTime            time.Time
-	PrePostSpeed        float64
-	EstimatedDuration   time.Duration
-	EstimatedFinishTime time.Time
-	FinishTime          time.Time
+	Id                string        `json:"id" bson:"-"`
+	preStarted        time.Time     `json:"-"`
+	started           time.Time     `json:"started"`
+	preSpeed          float64       `json:"-"`
+	estimatedDuration time.Duration `json:"-"`
+	estimatedEnded    time.Time     `json:"-"`
+	Ended             time.Time     `json:"ended"`
+	Duration          time.Duration `json:"durationNs"`
+	DurationReadable  string        `json:"durationHumanReadable"`
+	Speed             float64       `json:"speed"`
 }
 
 type MeasurementStarted struct {
@@ -72,87 +76,96 @@ func (m *Measure) Loop() {
 	for {
 		select {
 		case pre := <-m.pre:
-			fmt.Printf("pre %s\n", pre)
 			m.preBarrier(pre.Time)
+
 		case post := <-m.post:
-			fmt.Printf("post %s\n", post)
 			m.postBarrier(post.Time)
 
 		case finish := <-m.finish:
-			fmt.Printf("finish %s\n", finish)
 			m.finishBarrier(finish.Time)
 
 		}
 	}
 }
 
-//var starters []MeasurementStarted = make([]MeasurementStarted, 0, 5)
-
-//var currentStarter *time.Time
-//started := time.Now()
-//ended := time.Now()
-//duration := ended.Sub(started)
-
 func (m *Measure) preBarrier(t time.Time) {
-	m.preRunners = append(m.preRunners, Runner{PreTime: t})
-	fmt.Println(len(m.preRunners))
+	m.preRunners = append(m.preRunners, Runner{preStarted: t})
 }
 
 func (m *Measure) postBarrier(t time.Time) {
 	if len(m.preRunners) < 1 {
+		fmt.Println("no prerunners in array")
 		return
 	}
 
 	r := m.preRunners[0]
 	m.preRunners = m.preRunners[1:]
 
-	dur := t.Sub(r.PreTime)
-	r.PrePostSpeed = PREPOSTDISTANCEM / dur.Seconds()
-	r.EstimatedDuration = time.Duration(r.PrePostSpeed / POSTFINISHDISTANCEM)
-	r.EstimatedFinishTime = r.PreTime.Add(r.EstimatedDuration)
+	dur := t.Sub(r.preStarted)
+	r.preSpeed = PREPOSTDISTANCEM / dur.Seconds()
 
-	if r.PrePostSpeed > MAXSPEED {
-		fmt.Print("Too fast for this runner: %f, max: %f\n", r.PrePostSpeed, MAXSPEED)
+	r.estimatedDuration = (time.Duration(POSTFINISHDISTANCEM/r.preSpeed) * time.Second)
+
+	r.estimatedEnded = r.preStarted.Add(r.estimatedDuration)
+	fmt.Printf("estimated duration: %2.2v \n", r.estimatedDuration)
+	if r.preSpeed > MAXSPEED {
+		fmt.Printf("Too fast for this runner: %f, max: %f\n", r.preSpeed, MAXSPEED)
 		return
 	}
 
-	if r.PrePostSpeed < MINSPEED {
-		fmt.Print("Too slow though pre and post barriers: %f, min: %f\n", r.PrePostSpeed, MINSPEED)
+	if r.preSpeed < MINSPEED {
+		fmt.Printf("Too slow though pre and post barriers: %f, min: %f\n", r.preSpeed, MINSPEED)
 		return
 	}
+
+	r.started = t
+	fmt.Printf("pre runner moved to runners, now there is %v remaining\n", len(m.preRunners))
+	fmt.Printf("prerunner speed  %4.2f m/s \n", r.preSpeed)
 
 	m.output <- &MeasurementStarted{
-		Started: r.PostTime,
-		Speed:   r.PrePostSpeed,
+		Started: r.started,
+		Speed:   r.preSpeed,
 	}
 
-	r.PostTime = t
 	m.runners = append(m.runners, r)
 }
 
 func (m *Measure) finishBarrier(t time.Time) {
 	if len(m.runners) < 1 {
+		fmt.Println("no runners in array")
+
 		return
 	}
 
-	lowestDiff := math.Abs(m.runners[0].EstimatedFinishTime.Sub(t).Seconds())
+	lowestDiff := math.Abs(m.runners[0].estimatedEnded.Sub(t).Seconds())
 	index := 0
 	for i, _ := range m.runners {
-		diff := math.Abs(m.runners[i].EstimatedFinishTime.Sub(t).Seconds())
+
+		diff := math.Abs(m.runners[i].estimatedEnded.Sub(t).Seconds())
+		fmt.Printf("index: %v \tDifference: %4.2f \n", i, diff)
+
 		if diff < lowestDiff {
 			lowestDiff = diff
 			index = i
 		}
 	}
+	fmt.Printf("Runner: %v \tDifference %4.2f\n", index, lowestDiff)
 
-	m.runners[index].FinishTime = t
+	r := &m.runners[index]
+
+	r.Ended = t
+
+	fmt.Printf("Runner took %s to finish, now there's %v runners running.\n",
+		r.Ended.Sub(r.started),
+		len(m.runners)-1,
+	)
 
 	m.output <- &MeasurementEnded{
-		Started:          m.runners[index].PostTime,
-		Ended:            m.runners[index].FinishTime,
-		Duration:         m.runners[index].FinishTime.Sub(m.runners[index].PostTime),
-		DurationReadable: fmt.Sprintf("%s", m.runners[index].FinishTime.Sub(m.runners[index].PostTime)),
-		Speed:            POSTFINISHDISTANCEM / m.runners[index].FinishTime.Sub(m.runners[index].PostTime).Seconds(),
+		Started:          r.started,
+		Ended:            r.Ended,
+		Duration:         r.Ended.Sub(r.started),
+		DurationReadable: fmt.Sprintf("%s", r.Ended.Sub(r.started)),
+		Speed:            POSTFINISHDISTANCEM / r.Ended.Sub(r.started).Seconds(),
 	}
 
 	m.runners = append(m.runners[:index], m.runners[index+1:]...)
